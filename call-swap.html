@@ -1,170 +1,297 @@
-SECTIONS
-Summary
-Current state
-The scenario
-UX flow
-140-inch wall rules
-Parked walls
-Architecture
-Data model
-Sequences
-State model
-API and events
-Frontend
-Edge cases
-Access control
-Rollout
-Decisions
-TELEPRESENCE × XYNE · V2, WALL-TO-WALL ONLY
-Call switching with a parked-walls channel
-Every call is exactly two walls, each a 140-inch screen. One wall can move from its current partner to a different wall in one action. Both walls it leaves behind are parked, still connected and ready to be reconnected, never dropped.
-Scenario: A↔B and C↔D
-Every call has exactly 2 participants, both walls
-LiveKit video only
-Updated 8 Oct 2026
-What changed from v1
-Join mode and group calls are removed, so there is no swap-or-join question. A switch always takes the target wall out of its call. Because a wall has no keyboard, a paired Wall Controller (phone or tablet) now starts the switch.
-What gets built
-Two new tables (WallSession, IdleSession), three endpoints, one read-only lookup on telepresence-portal, a Parked screen on every wall, and a Wall Controller page. Call and CallParticipant do not change.
-Current state
-Nothing links a Xyne call to a telepresence wall in either database. A wall is a kiosk Chrome browser that opens a URL, so Xyne sees it as an ordinary user.
-SYSTEM
-WHAT IT TRACKS
-CALL / WALL LINKAGE
-Xyne schema.prisma
-Call (LiveKit room, status, roomLink) and CallParticipant (userId, joinedAt, leftAt)
-A wall joins as a normal User. Xyne cannot tell a wall from a person.
-xyne-spaces-private telepresence-monitoring
-TelepresenceHealthView/Log, TelepresenceMeetingStatus (userId, isMeetingActive)
-Keyed by userId only. No callId or roomId.
-telepresence-portal dashboard
-Wall (wallType, status), Meeting (sourceWallId, targetWallId)
-Meeting is wall-to-wall and internal. Nothing references a Xyne Call.id.
-How a wall joins today
-A kiosk Chrome with a persistent profile logs in and opens /<workspaceId>/chat/<route>/<channelId>?autoJoin=1&mic=…&camera=…&telepresence=1 (PR-029). The telepresence=1 flag only turns on Presentation Mode in the frontend. The backend row it creates is the same as any other user's.
-Calls run on LiveKit with one room per Call, created 1:1 by liveKitService.ts. There is no multi-room or room-bridging code.
-What exists to build on, and what does not
-Missing
-No mid-call idle state. Every "idle" in roomMachine.ts and callMachine.ts is a pre-join lifecycle state.
-Missing
-The "+1 call waiting" banner in IncomingCallModal ends the current call before joining the new one. That forced end is what this project replaces.
-Missing
-No way for a person to control a wall. The wall is a kiosk browser with no input device, so nobody can press a button on it.
-Usable
-Wall.wallType already has a SWITCHABLE value next to PRIMARY. It is declared and never read, and it is confirmed to exist for this feature.
-The scenario
-Wall A is talking to Wall B. Wall C is talking to Wall D. Someone at Wall A wants D instead of B. After the switch, A and D are connected. B and C are both parked. If D was not in a call, only B is parked. Try both:
-WALL D IS
-in a call with C
-free
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#faf9f5;color:#141413}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>Call Switching Design</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: sticky section index on the left, one reading column on the right, collapses to a single column on phones */
+:root{
+  --bg:#f6f7f8; --surface:#ffffff; --surface-2:#eef1f3; --fg:#14202a; --muted:#566570; --line:#d8dee3;
+  --accent:#126a86; --accent-soft:#dcedf2; --accent-fg:#ffffff;
+  --idle:#9a5b00; --idle-soft:#fbecd2;
+  --ok:#1c7a46; --ok-soft:#dcf1e4; --crit:#b3352b; --crit-soft:#f9e1de;
+  --font-display:"Schibsted Grotesk","Helvetica Neue",Arial,sans-serif;
+  --font-body:"IBM Plex Sans","Helvetica Neue",Arial,sans-serif;
+  --font-mono:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#0f171d; --surface:#16212a; --surface-2:#1d2a34; --fg:#e6edf2; --muted:#9bacb8; --line:#2b3a46;
+  --accent:#5cc2e0; --accent-soft:#17323d; --accent-fg:#06232d;
+  --idle:#f2b45a; --idle-soft:#3a2b10;
+  --ok:#5fcf8f; --ok-soft:#14331f; --crit:#f08a80; --crit-soft:#3d1c19; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0f171d; --surface:#16212a; --surface-2:#1d2a34; --fg:#e6edf2; --muted:#9bacb8; --line:#2b3a46;
+  --accent:#5cc2e0; --accent-soft:#17323d; --accent-fg:#06232d;
+  --idle:#f2b45a; --idle-soft:#3a2b10;
+  --ok:#5fcf8f; --ok-soft:#14331f; --crit:#f08a80; --crit-soft:#3d1c19; color-scheme:dark}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font:15px/1.6 var(--font-body);padding-inline:16px;padding-block:24px 64px}
+.wrap{max-width:1120px;margin:0 auto;display:grid;grid-template-columns:200px minmax(0,1fr);gap:40px}
+nav.toc{position:sticky;top:calc(env(safe-area-inset-top,0px) + 16px);align-self:start;font-size:13px;display:flex;flex-direction:column;gap:2px}
+nav.toc b{font:600 11px var(--font-mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:8px}
+nav.toc a{color:var(--muted);text-decoration:none;padding:4px 0 4px 10px;border-left:2px solid var(--line)}
+nav.toc a:hover{color:var(--fg);border-color:var(--accent)}
+main{min-width:0;display:flex;flex-direction:column;gap:56px}
+h1,h2,h3{font-family:var(--font-display);text-wrap:balance;line-height:1.15;margin:0}
+h1{font-size:clamp(28px,4.4vw,42px);font-weight:700;letter-spacing:-.01em}
+h2{font-size:26px;font-weight:700;letter-spacing:-.005em;margin-bottom:14px}
+h3{font-size:17px;font-weight:600;margin:26px 0 8px}
+p{margin:0 0 12px;max-width:68ch}
+.lede{font-size:17px;color:var(--muted);max-width:62ch}
+.meta{font:12px var(--font-mono);color:var(--muted);display:flex;flex-wrap:wrap;gap:6px 18px;margin-top:14px}
+code,.mono{font-family:var(--font-mono);font-size:.88em}
+code{background:var(--surface-2);padding:1px 5px;border-radius:4px}
+.eyebrow{font:500 11px var(--font-mono);letter-spacing:.09em;text-transform:uppercase;color:var(--accent);margin-bottom:6px}
+.scroll{overflow-x:auto;border:1px solid var(--line);border-radius:8px;background:var(--surface)}
+table{border-collapse:collapse;width:100%;font-size:13.5px}
+th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font:600 11px var(--font-mono);letter-spacing:.06em;text-transform:uppercase;color:var(--muted);background:var(--surface-2);white-space:nowrap}
+tr:last-child td{border-bottom:0}
+.tag{display:inline-block;font:500 11px var(--font-mono);padding:1px 7px;border-radius:99px;background:var(--accent-soft);color:var(--accent);white-space:nowrap}
+.tag.idle{background:var(--idle-soft);color:var(--idle)}.tag.ok{background:var(--ok-soft);color:var(--ok)}.tag.crit{background:var(--crit-soft);color:var(--crit)}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}
+.box{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:14px 16px;min-width:0}
+.box h3{margin-top:0}
+.note{border-left:3px solid var(--idle);background:var(--idle-soft);padding:10px 14px;border-radius:0 8px 8px 0;font-size:14px;max-width:80ch}
+.note b{color:var(--idle)}
+.fig{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:14px;overflow-x:auto}
+.cap{font-size:12.5px;color:var(--muted);margin-top:8px}
+figure{margin:0}
+figcaption{font-size:12.5px;color:var(--muted);margin-top:8px}
+pre.mermaid{margin:0;background:transparent;min-width:560px}
+pre.code{margin:0;background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:12px 14px;overflow-x:auto;font:12.5px/1.55 var(--font-mono)}
+svg text{font-family:var(--font-body);fill:var(--fg)}
+.sv-box{fill:var(--surface);stroke:var(--line);stroke-width:1.2}
+.sv-new{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.4}
+.sv-idle{fill:var(--idle-soft);stroke:var(--idle);stroke-width:1.4}
+.sv-grp{fill:var(--surface-2);stroke:var(--line);stroke-width:1;stroke-dasharray:4 4}
+.sv-line{stroke:var(--muted);stroke-width:1.4;fill:none}
+.sv-dash{stroke:var(--muted);stroke-width:1.2;fill:none;stroke-dasharray:5 4}
+.sv-t{font-size:12.5px}.sv-s{font-size:11px;fill:var(--muted)}.sv-h{font-size:11px;font-weight:600;letter-spacing:.06em;fill:var(--muted)}
+/* walkthrough */
+.steps{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}
+.steps button,.seg button{font:500 13px var(--font-body);background:var(--surface);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:7px 12px;cursor:pointer}
+.steps button[aria-selected="true"],.seg button[aria-pressed="true"]{background:var(--accent);color:var(--accent-fg);border-color:var(--accent)}
+button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.stage{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);gap:16px;align-items:start}
+.walls{display:grid;gap:10px;min-width:0}
+.walls.three{grid-template-columns:1fr 1fr}
+.walls.three .wall:first-child{grid-column:1/-1}
+.wall{aspect-ratio:16/9;background:#0d1317;color:#e8eef2;border-radius:8px;border:1px solid var(--line);position:relative;overflow:hidden;display:grid;place-items:center;min-width:0}
+.wall *{color:inherit}
+.wall .lbl{position:absolute;left:10px;top:8px;font:500 10px var(--font-mono);color:#93a4af;letter-spacing:.05em}
+.wall .lbl em{font-style:normal;background:#26343d;border-radius:99px;padding:1px 7px;margin-left:6px}
+.feed{position:absolute;inset:0;background:linear-gradient(135deg,#1c2a33,#12191e);display:grid;place-items:center}
+.feed b{font:700 clamp(34px,7vw,64px) var(--font-display);color:#2f4350}
+.cap-bar{position:absolute;left:10px;bottom:8px;background:#000a;border-radius:99px;padding:2px 12px;font-size:clamp(10px,1.6vw,14px)}
+.big{font:600 clamp(13px,2.4vw,24px) var(--font-display);text-align:center;padding:0 12px;line-height:1.25}
+.big small{display:block;font:400 clamp(10px,1.5vw,13px) var(--font-body);color:#93a4af;margin-top:6px}
+.wall.parked{background:#241a08}
+.wall.parked .big{color:#f2b45a}
+.dimfeed{position:absolute;inset:0;background:linear-gradient(135deg,#1c2a33,#12191e);filter:blur(4px);opacity:.6}
+.spin{width:22px;height:22px;border-radius:50%;border:3px solid #33444f;border-top-color:#5cc2e0;animation:sp 1s linear infinite;margin:0 auto 8px}
+@keyframes sp{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.spin{animation:none}}
+.phone{background:#0d1317;color:#e8eef2;border:1px solid var(--line);border-radius:20px;padding:12px;max-width:270px;margin:0 auto 14px;font-size:12.5px}
+.phone *{color:inherit}
+.phone h4{margin:0 0 8px;font:600 13px var(--font-display);display:flex;justify-content:space-between;gap:6px}
+.p-sub{font:500 10px var(--font-mono);color:#93a4af;letter-spacing:.05em;text-transform:uppercase;margin:10px 0 5px}
+.opt{display:flex;justify-content:space-between;gap:8px;align-items:center;padding:7px 9px;border-radius:7px;border:1px solid #33444f;margin-bottom:5px}
+.opt.sel{border-color:#5cc2e0;background:#17323d}
+.opt small{color:#93a4af;display:block;font-size:10.5px}
+.pill{font:500 10px var(--font-mono);padding:1px 7px;border-radius:99px;background:#26343d;white-space:nowrap}
+.pill.am{background:#3a2b10;color:#f2b45a}.pill.gr{background:#14331f;color:#5fcf8f}
+.pbtn{display:block;text-align:center;border-radius:8px;padding:8px;background:#26343d;margin-top:6px;font-weight:500}
+.pbtn.p{background:#5cc2e0;color:#06232d}.pbtn.p *{color:#06232d}
+.side{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:12px 14px;min-width:0}
+.side h4{margin:0 0 8px;font:600 11px var(--font-mono);letter-spacing:.07em;text-transform:uppercase;color:var(--muted)}
+.side p{font-size:13.5px;margin-bottom:8px}
+/* simulator */
+.sim-ctl{display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+.seg{display:flex;gap:4px;align-items:center}
+.seg label{font:500 11px var(--font-mono);color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-right:6px}
+.cols{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.col{border:1px solid var(--line);border-radius:8px;background:var(--surface);padding:10px;min-height:96px}
+.col.idlec{background:var(--idle-soft);border-color:var(--idle)}
+.col h4{margin:0 0 8px;font:600 12px var(--font-display)}
+.chips{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.pair{display:flex;align-items:center;gap:4px;margin-bottom:6px}
+.pair i{font-style:normal;color:var(--muted);font-size:12px}
+.chip{font:600 13px var(--font-display);width:34px;height:34px;border-radius:50%;display:grid;place-items:center;background:var(--accent-soft);color:var(--accent);border:1.5px solid var(--accent)}
+.chip.moved{background:var(--accent);color:var(--accent-fg)}
+.col.idlec .chip{background:var(--surface);color:var(--idle);border-color:var(--idle)}
+.empty{font-size:12px;color:var(--muted)}
+.simnote{font-size:13.5px;margin-top:10px;color:var(--muted);max-width:72ch}
+ol.flow{padding-left:20px;margin:0;max-width:72ch}ol.flow li{margin-bottom:6px}
+@media (max-width:860px){
+  .wrap{grid-template-columns:minmax(0,1fr);gap:20px}
+  nav.toc{position:static;flex-direction:row;flex-wrap:wrap;gap:4px 14px}
+  nav.toc b{width:100%;margin-bottom:2px}
+  nav.toc a{border-left:0;padding:2px 0}
+  .stage{grid-template-columns:minmax(0,1fr)}
+  .cols{grid-template-columns:minmax(0,1fr)}
+}
+</style>
 
-Highlighted circles are walls that changed place.
-UX flow
-A person standing at Wall A uses the Wall Controller on a phone or tablet. The wall screen only shows the call and its status. Step through the six moments below. Dark panels are the proposed UI: wall screens on the left, the controller on the right.
+<div class="wrap">
+<nav class="toc" aria-label="Sections">
+  <b>Sections</b>
+  <a href="#summary">Summary</a><a href="#current">Current state</a><a href="#scenario">The scenario</a><a href="#ux">UX flow</a><a href="#wallui">140-inch wall rules</a><a href="#idle">Parked walls</a><a href="#arch">Architecture</a><a href="#data">Data model</a><a href="#seq">Sequences</a><a href="#state">State model</a><a href="#api">API and events</a><a href="#fe">Frontend</a><a href="#edge">Edge cases</a><a href="#access">Access control</a><a href="#rollout">Rollout</a><a href="#decisions">Decisions</a>
+</nav>
 
+<main>
+<header id="summary">
+  <div class="eyebrow">Telepresence × Xyne · v2, wall-to-wall only</div>
+  <h1>Call switching with a parked-walls channel</h1>
+  <p class="lede">Every call is exactly two walls, each a 140-inch screen. One wall can move from its current partner to a different wall in one action. Both walls it leaves behind are parked, still connected and ready to be reconnected, never dropped.</p>
+  <div class="meta"><span>Scenario: A↔B and C↔D</span><span>Every call has exactly 2 participants, both walls</span><span>LiveKit video only</span><span>Updated 8 Oct 2026</span></div>
+  <div class="grid2" style="margin-top:20px">
+    <div class="box"><h3>What changed from v1</h3><p>Join mode and group calls are removed, so there is no swap-or-join question. A switch always takes the target wall out of its call. Because a wall has no keyboard, a paired Wall Controller (phone or tablet) now starts the switch.</p></div>
+    <div class="box"><h3>What gets built</h3><p>Two new tables (<code>WallSession</code>, <code>IdleSession</code>), three endpoints, one read-only lookup on telepresence-portal, a Parked screen on every wall, and a Wall Controller page. <code>Call</code> and <code>CallParticipant</code> do not change.</p></div>
+  </div>
+</header>
 
-Rules the flow follows
-	1	Switching is always one confirmation. The confirm text names which walls will be parked.
-	2	The picker lists ongoing calls, parked walls and free walls. Each row shows the wall label and who it is with.
-	3	Wall A keeps showing its current partner until the new connection is confirmed. If the switch fails, A is still with B.
-	4	Parked walls always tell the room what happened and who can bring them back. A wall never just goes black.
-	5	Walls that are not marked SWITCHABLE do not appear in the picker and cannot be parked.
-Rules for a 140-inch screen
-People stand two to four metres from these screens, and the feed is life-size. That changes what the wall UI may do.
-MOMENT
-WHAT THE WALL SHOWS
-WHY
-In call
-Full-screen partner feed. A small label at the bottom edge with partner name and place. No buttons.
-The wall has no input. Anything clickable would be dead UI at that size.
-Connecting
-The last frame, blurred, with one large line: "Connecting to Pune 3F…"
-A sudden black frame across 140 inches reads as a failure. A blurred hold reads as intentional.
-Parked
-Amber screen, large type: "Parked. Pune 3F was moved to another call." A small timer shows when it returns to the home screen.
-The people in the room need to know the wall is waiting, and why.
-Camera and microphone
-Off while parked. A visible "Camera off" line on the screen.
-A parked wall must never keep broadcasting a room that nobody is watching.
-Return to home
-The wall's normal home or ambient screen after the timeout.
-Parked is temporary. It must not become a stuck state.
-Needs confirming with the hardware team: whether the wall's own pipeline (camera, audio, display scaler) is call-agnostic. It looks like a plain kiosk feed, but the Python side was not researched, and 4K decode on two rooms at once during a join-first switch may be a real load.
-Parked walls
-Parked is a real connection that is not part of any call. It is the opposite of hanging up. Today the data model only knows "in call" and "left" (CallParticipant.leftAt). Parked is a third state between them.
+<section id="current">
+  <h2>Current state</h2>
+  <p>Nothing links a Xyne call to a telepresence wall in either database. A wall is a kiosk Chrome browser that opens a URL, so Xyne sees it as an ordinary user.</p>
+  <div class="scroll"><table>
+    <tr><th>System</th><th>What it tracks</th><th>Call / wall linkage</th></tr>
+    <tr><td>Xyne <code>schema.prisma</code></td><td><code>Call</code> (LiveKit room, status, roomLink) and <code>CallParticipant</code> (userId, joinedAt, leftAt)</td><td>A wall joins as a normal <code>User</code>. Xyne cannot tell a wall from a person.</td></tr>
+    <tr><td>xyne-spaces-private telepresence-monitoring</td><td><code>TelepresenceHealthView/Log</code>, <code>TelepresenceMeetingStatus</code> (userId, isMeetingActive)</td><td>Keyed by userId only. No callId or roomId.</td></tr>
+    <tr><td>telepresence-portal dashboard</td><td><code>Wall</code> (wallType, status), <code>Meeting</code> (sourceWallId, targetWallId)</td><td>Meeting is wall-to-wall and internal. Nothing references a Xyne <code>Call.id</code>.</td></tr>
+  </table></div>
+  <h3>How a wall joins today</h3>
+  <p>A kiosk Chrome with a persistent profile logs in and opens <code>/&lt;workspaceId&gt;/chat/&lt;route&gt;/&lt;channelId&gt;?autoJoin=1&amp;mic=…&amp;camera=…&amp;telepresence=1</code> (PR-029). The <code>telepresence=1</code> flag only turns on Presentation Mode in the frontend. The backend row it creates is the same as any other user's.</p>
+  <p>Calls run on LiveKit with one room per <code>Call</code>, created 1:1 by <code>liveKitService.ts</code>. There is no multi-room or room-bridging code.</p>
+  <h3>What exists to build on, and what does not</h3>
+  <div class="grid2">
+    <div class="box"><span class="tag crit">Missing</span><p style="margin-top:8px">No mid-call idle state. Every "idle" in <code>roomMachine.ts</code> and <code>callMachine.ts</code> is a pre-join lifecycle state.</p></div>
+    <div class="box"><span class="tag crit">Missing</span><p style="margin-top:8px">The "+1 call waiting" banner in <code>IncomingCallModal</code> ends the current call before joining the new one. That forced end is what this project replaces.</p></div>
+    <div class="box"><span class="tag crit">Missing</span><p style="margin-top:8px">No way for a person to control a wall. The wall is a kiosk browser with no input device, so nobody can press a button on it.</p></div>
+    <div class="box"><span class="tag ok">Usable</span><p style="margin-top:8px"><code>Wall.wallType</code> already has a <code>SWITCHABLE</code> value next to <code>PRIMARY</code>. It is declared and never read, and it is confirmed to exist for this feature.</p></div>
+  </div>
+</section>
 
-IN CALL
-PARKED
-ENDED
-Connection
-Live, publishing to the call room
-Live in the workspace's idle room, not publishing
-Closed, wall at home screen
-Camera and mic
-On
-Off
-Off
-Seen by others
-By its partner
-No
-No
-Reconnect
-n/a
-Fast: token already issued, join the call room, then leave the idle room
-Full rejoin with a new session
-Listed on controllers
-As "in a call with X"
-In the Parked list, with time parked
-As "free"
-Reconnecting a parked wall
-Reconnecting is the same action as switching, with a parked wall as the target. From the controller at Wall A, tap a parked wall and confirm. A leaves its current partner (who becomes parked) and connects to the parked wall. There is no separate resume flow.
-Timeout
-A parked wall that nobody reconnects ends for real and returns to its home screen. Start with 10 minutes, configurable. That number is a placeholder until whoever owns LiveKit capacity gives a real one.
-Needs a decision: what "instant" means in LiveKit. A LiveKit participant belongs to one room and tracks cannot move between rooms, so a handshake-free reconnect is not possible. The proposed design keeps each parked wall connected to a per-workspace idle room with a token for the call room already minted. Reconnecting connects to the call room first and leaves the idle room second. That should feel instant, usually well under a second. Please confirm that is acceptable, or measure it before Phase 1.
-Architecture
-Every new piece lives in Xyne's backend or in the two web UIs. The one cross-system call is a read-only question to telepresence-portal about a wall's type.
-CLIENTS
-Wall kiosk Chrome
-140-inch, same UI (PR-029)
-Wall Controller
-phone or tablet, paired
-idleSessionMachine
-runs in the wall kiosk
-Parked screen
-and Connecting overlay
-XYNE BACKEND
-Switch + Idle API
-POST switch · GET idle · POST release
-liveKitService.ts
-rooms, tokens (extended)
-Call · CallParticipant
-unchanged
-WallSession + IdleSession
-liveness + atomic claim
-MEDIA AND REALTIME
-LiveKit call rooms
-one room per Call, 2 walls
-LiveKit idle room
-one per workspace, no publishing
-Realtime channel (push)
-TELEPRESENCE-PORTAL
-GET /api/walls/by-user/:id
-read-only, returns wallType
-HEALTH PATH, NOT TOUCHED BY THIS PROJECT
-Wall
-health reports
-xyne-spaces-private
-telepresence-monitoring
-telepresence-portal dashboard
-Wall, Meeting
-Solid: calls the design makes. Dashed: the one cross-system read. Idle room and call rooms are separate LiveKit rooms.
-Blue boxes are new. Amber is the idle room.
-Who is allowed to switch
-A Wall Controller is paired to exactly one wall. Its token acts as that wall's user, so the backend sees "Wall A asks to switch" and not "a phone asks". Pairing is a one-time step per wall.
-Which walls must be switchable
-The switch moves up to four walls: A, B (parked), C (parked) and D (target). All of them must be SWITCHABLE. If any is PRIMARY, the switch is refused with a clear reason and nothing changes. Free walls only need A and D checked.
-Data model
-Call and CallParticipant are untouched. WallSession is the new source of truth for which LiveKit room a wall is actually connected to right now, in a call or parked. IdleSession layers the parked business state (who it's parked from, its timers) on top of a WallSession row instead of tracking its own room SID. Wall lives in another database and is read live, never copied. Every Call has exactly two active participants.
+<section id="scenario">
+  <h2>The scenario</h2>
+  <p>Wall A is talking to Wall B. Wall C is talking to Wall D. Someone at Wall A wants D instead of B. After the switch, A and D are connected. B and C are both parked. If D was not in a call, only B is parked. Try both:</p>
+  <div class="fig">
+    <div class="sim-ctl">
+      <div class="seg" role="group" aria-label="State of Wall D"><label>Wall D is</label><button id="d-call" aria-pressed="true">in a call with C</button><button id="d-free" aria-pressed="false">free</button></div>
+    </div>
+    <div class="cols" id="simcols"></div>
+    <div class="simnote" id="simnote"></div>
+  </div>
+  <p class="cap">Highlighted circles are walls that changed place.</p>
+</section>
+
+<section id="ux">
+  <h2>UX flow</h2>
+  <p>A person standing at Wall A uses the Wall Controller on a phone or tablet. The wall screen only shows the call and its status. Step through the six moments below. Dark panels are the proposed UI: wall screens on the left, the controller on the right.</p>
+  <div class="steps" role="tablist" id="steps"></div>
+  <div class="stage">
+    <div class="walls" id="walls" aria-live="polite"></div>
+    <div>
+      <div class="phone" id="phone"></div>
+      <div class="side" id="sidecopy"></div>
+    </div>
+  </div>
+  <h3>Rules the flow follows</h3>
+  <ol class="flow">
+    <li>Switching is always one confirmation. The confirm text names which walls will be parked.</li>
+    <li>The picker lists ongoing calls, parked walls and free walls. Each row shows the wall label and who it is with.</li>
+    <li>Wall A keeps showing its current partner until the new connection is confirmed. If the switch fails, A is still with B.</li>
+    <li>Parked walls always tell the room what happened and who can bring them back. A wall never just goes black.</li>
+    <li>Walls that are not marked <code>SWITCHABLE</code> do not appear in the picker and cannot be parked.</li>
+  </ol>
+</section>
+
+<section id="wallui">
+  <h2>Rules for a 140-inch screen</h2>
+  <p>People stand two to four metres from these screens, and the feed is life-size. That changes what the wall UI may do.</p>
+  <div class="scroll"><table>
+    <tr><th>Moment</th><th>What the wall shows</th><th>Why</th></tr>
+    <tr><td>In call</td><td>Full-screen partner feed. A small label at the bottom edge with partner name and place. No buttons.</td><td>The wall has no input. Anything clickable would be dead UI at that size.</td></tr>
+    <tr><td>Connecting</td><td>The last frame, blurred, with one large line: "Connecting to Pune 3F…"</td><td>A sudden black frame across 140 inches reads as a failure. A blurred hold reads as intentional.</td></tr>
+    <tr><td>Parked</td><td>Amber screen, large type: "Parked. Pune 3F was moved to another call." A small timer shows when it returns to the home screen.</td><td>The people in the room need to know the wall is waiting, and why.</td></tr>
+    <tr><td>Camera and microphone</td><td>Off while parked. A visible "Camera off" line on the screen.</td><td>A parked wall must never keep broadcasting a room that nobody is watching.</td></tr>
+    <tr><td>Return to home</td><td>The wall's normal home or ambient screen after the timeout.</td><td>Parked is temporary. It must not become a stuck state.</td></tr>
+  </table></div>
+  <div class="note" style="margin-top:14px"><b>Needs confirming with the hardware team:</b> whether the wall's own pipeline (camera, audio, display scaler) is call-agnostic. It looks like a plain kiosk feed, but the Python side was not researched, and 4K decode on two rooms at once during a join-first switch may be a real load.</div>
+</section>
+
+<section id="idle">
+  <h2>Parked walls</h2>
+  <p>Parked is a real connection that is not part of any call. It is the opposite of hanging up. Today the data model only knows "in call" and "left" (<code>CallParticipant.leftAt</code>). Parked is a third state between them.</p>
+  <div class="scroll"><table>
+    <tr><th></th><th>In call</th><th>Parked</th><th>Ended</th></tr>
+    <tr><td>Connection</td><td>Live, publishing to the call room</td><td>Live in the workspace's idle room, not publishing</td><td>Closed, wall at home screen</td></tr>
+    <tr><td>Camera and mic</td><td>On</td><td>Off</td><td>Off</td></tr>
+    <tr><td>Seen by others</td><td>By its partner</td><td>No</td><td>No</td></tr>
+    <tr><td>Reconnect</td><td>n/a</td><td>Fast: token already issued, join the call room, then leave the idle room</td><td>Full rejoin with a new session</td></tr>
+    <tr><td>Listed on controllers</td><td>As "in a call with X"</td><td>In the Parked list, with time parked</td><td>As "free"</td></tr>
+  </table></div>
+  <h3>Reconnecting a parked wall</h3>
+  <p>Reconnecting is the same action as switching, with a parked wall as the target. From the controller at Wall A, tap a parked wall and confirm. A leaves its current partner (who becomes parked) and connects to the parked wall. There is no separate resume flow.</p>
+  <h3>Timeout</h3>
+  <p>A parked wall that nobody reconnects ends for real and returns to its home screen. Start with 10 minutes, configurable. That number is a placeholder until whoever owns LiveKit capacity gives a real one.</p>
+  <div class="note" style="margin-top:14px"><b>Needs a decision: what "instant" means in LiveKit.</b> A LiveKit participant belongs to one room and tracks cannot move between rooms, so a handshake-free reconnect is not possible. The proposed design keeps each parked wall connected to a per-workspace idle room with a token for the call room already minted. Reconnecting connects to the call room first and leaves the idle room second. That should feel instant, usually well under a second. Please confirm that is acceptable, or measure it before Phase 1.</div>
+</section>
+
+<section id="arch">
+  <h2>Architecture</h2>
+  <p>Every new piece lives in Xyne's backend or in the two web UIs. The one cross-system call is a read-only question to telepresence-portal about a wall's type.</p>
+  <figure class="fig">
+  <svg viewBox="0 0 900 470" role="img" aria-label="Architecture: walls, wall controller, Xyne backend, LiveKit and telepresence-portal" style="min-width:720px;width:100%;height:auto">
+    <text class="sv-h" x="20" y="22">CLIENTS</text>
+    <rect class="sv-grp" x="16" y="30" width="190" height="300" rx="8"/>
+    <rect class="sv-box" x="32" y="48" width="158" height="52" rx="6"/><text class="sv-t" x="111" y="70" text-anchor="middle">Wall kiosk Chrome</text><text class="sv-s" x="111" y="87" text-anchor="middle">140-inch, same UI (PR-029)</text>
+    <rect class="sv-new" x="32" y="116" width="158" height="52" rx="6"/><text class="sv-t" x="111" y="138" text-anchor="middle">Wall Controller</text><text class="sv-s" x="111" y="155" text-anchor="middle">phone or tablet, paired</text>
+    <rect class="sv-new" x="32" y="184" width="158" height="52" rx="6"/><text class="sv-t" x="111" y="206" text-anchor="middle">idleSessionMachine</text><text class="sv-s" x="111" y="223" text-anchor="middle">runs in the wall kiosk</text>
+    <rect class="sv-new" x="32" y="252" width="158" height="52" rx="6"/><text class="sv-t" x="111" y="274" text-anchor="middle">Parked screen</text><text class="sv-s" x="111" y="291" text-anchor="middle">and Connecting overlay</text>
+
+    <text class="sv-h" x="300" y="22">XYNE BACKEND</text>
+    <rect class="sv-grp" x="290" y="30" width="270" height="300" rx="8"/>
+    <rect class="sv-new" x="306" y="48" width="238" height="52" rx="6"/><text class="sv-t" x="425" y="70" text-anchor="middle">Switch + Idle API</text><text class="sv-s" x="425" y="87" text-anchor="middle">POST switch · GET idle · POST release</text>
+    <rect class="sv-box" x="306" y="116" width="238" height="52" rx="6"/><text class="sv-t" x="425" y="138" text-anchor="middle">liveKitService.ts</text><text class="sv-s" x="425" y="155" text-anchor="middle">rooms, tokens (extended)</text>
+    <rect class="sv-box" x="306" y="184" width="238" height="52" rx="6"/><text class="sv-t" x="425" y="206" text-anchor="middle">Call · CallParticipant</text><text class="sv-s" x="425" y="223" text-anchor="middle">unchanged</text>
+    <rect class="sv-new" x="306" y="252" width="238" height="52" rx="6"/><text class="sv-t" x="425" y="274" text-anchor="middle">WallSession + IdleSession</text><text class="sv-s" x="425" y="291" text-anchor="middle">liveness + atomic claim</text>
+
+    <text class="sv-h" x="650" y="22">MEDIA AND REALTIME</text>
+    <rect class="sv-grp" x="640" y="30" width="244" height="190" rx="8"/>
+    <rect class="sv-box" x="656" y="48" width="212" height="52" rx="6"/><text class="sv-t" x="762" y="70" text-anchor="middle">LiveKit call rooms</text><text class="sv-s" x="762" y="87" text-anchor="middle">one room per Call, 2 walls</text>
+    <rect class="sv-idle" x="656" y="116" width="212" height="52" rx="6"/><text class="sv-t" x="762" y="138" text-anchor="middle">LiveKit idle room</text><text class="sv-s" x="762" y="155" text-anchor="middle">one per workspace, no publishing</text>
+    <rect class="sv-new" x="656" y="170" width="212" height="40" rx="6"/><text class="sv-t" x="762" y="195" text-anchor="middle">Realtime channel (push)</text>
+
+    <text class="sv-h" x="640" y="248">TELEPRESENCE-PORTAL</text>
+    <rect class="sv-grp" x="640" y="256" width="244" height="74" rx="8"/>
+    <rect class="sv-new" x="656" y="270" width="212" height="46" rx="6"/><text class="sv-t" x="762" y="291" text-anchor="middle">GET /api/walls/by-user/:id</text><text class="sv-s" x="762" y="307" text-anchor="middle">read-only, returns wallType</text>
+
+    <path class="sv-line" d="M206 142 H250 V74 H306"/><path class="sv-line" d="M206 74 H230 V210 H306" opacity="0"/>
+    <path class="sv-line" d="M206 278 H306"/>
+    <path class="sv-line" d="M544 142 H600 V74 H656"/><path class="sv-line" d="M544 142 H656"/>
+    <path class="sv-line" d="M544 278 H575 V190 H656"/>
+    <path class="sv-dash" d="M544 90 L610 90 L610 292 L656 292"/>
+
+    <text class="sv-h" x="20" y="366">HEALTH PATH, NOT TOUCHED BY THIS PROJECT</text>
+    <rect class="sv-box" x="32" y="378" width="170" height="52" rx="6"/><text class="sv-t" x="117" y="400" text-anchor="middle">Wall</text><text class="sv-s" x="117" y="417" text-anchor="middle">health reports</text>
+    <rect class="sv-box" x="290" y="378" width="230" height="52" rx="6"/><text class="sv-t" x="405" y="400" text-anchor="middle">xyne-spaces-private</text><text class="sv-s" x="405" y="417" text-anchor="middle">telepresence-monitoring</text>
+    <rect class="sv-box" x="620" y="378" width="230" height="52" rx="6"/><text class="sv-t" x="735" y="400" text-anchor="middle">telepresence-portal dashboard</text><text class="sv-s" x="735" y="417" text-anchor="middle">Wall, Meeting</text>
+    <path class="sv-line" d="M202 404 H290"/><path class="sv-line" d="M520 404 H620"/>
+    <text class="sv-s" x="450" y="456" text-anchor="middle">Solid: calls the design makes. Dashed: the one cross-system read. Idle room and call rooms are separate LiveKit rooms.</text>
+  </svg>
+  <figcaption>Blue boxes are new. Amber is the idle room.</figcaption>
+  </figure>
+  <h3>Who is allowed to switch</h3>
+  <p>A Wall Controller is paired to exactly one wall. Its token acts as that wall's user, so the backend sees "Wall A asks to switch" and not "a phone asks". Pairing is a one-time step per wall.</p>
+  <h3>Which walls must be switchable</h3>
+  <p>The switch moves up to four walls: A, B (parked), C (parked) and D (target). All of them must be <code>SWITCHABLE</code>. If any is <code>PRIMARY</code>, the switch is refused with a clear reason and nothing changes. Free walls only need A and D checked.</p>
+</section>
+
+<section id="data">
+  <h2>Data model</h2>
+  <p><code>Call</code> and <code>CallParticipant</code> are untouched. <code>WallSession</code> is the new source of truth for which LiveKit room a wall is actually connected to right now, in a call or parked. <code>IdleSession</code> layers the parked business state (who it's parked from, its timers) on top of a <code>WallSession</code> row instead of tracking its own room SID. <code>Wall</code> lives in another database and is read live, never copied. Every <code>Call</code> has exactly two active participants.</p>
+  <figure class="fig"><pre class="mermaid">
 erDiagram
   USER ||--o{ CALL_PARTICIPANT : joins
   CALL ||--|{ CALL_PARTICIPANT : has_two
@@ -203,10 +330,14 @@ erDiagram
     datetime joinedAt
     datetime leftAt
   }
-  
-The participant-to-idle link is not a foreign key. It is the switch itself: one participant row stops being active and one idle session starts. The parked wall's previous partner is derived from fromCallId. workspaceId is my addition so visibility can be filtered without a join. WallSession.lastHeartbeatAt is what "connected to the service" actually means: the kiosk and the Wall Controller refresh it on a short interval, and a session whose heartbeat goes stale is what the reconciler (Edge cases) treats as dead, not just a row nobody explicitly closed.
-Sequences
-Switching A to D (D is in a call with C)
+  </pre></figure>
+  <p class="cap">The participant-to-idle link is not a foreign key. It is the switch itself: one participant row stops being active and one idle session starts. The parked wall's previous partner is derived from <code>fromCallId</code>. <code>workspaceId</code> is my addition so visibility can be filtered without a join. <code>WallSession.lastHeartbeatAt</code> is what "connected to the service" actually means: the kiosk and the Wall Controller refresh it on a short interval, and a session whose heartbeat goes stale is what the reconciler (Edge cases) treats as dead, not just a row nobody explicitly closed.</p>
+</section>
+
+<section id="seq">
+  <h2>Sequences</h2>
+  <h3>Switching A to D (D is in a call with C)</h3>
+  <figure class="fig"><pre class="mermaid">
 sequenceDiagram
   autonumber
   participant K as Controller for Wall A
@@ -229,13 +360,16 @@ sequenceDiagram
     X->>R: idle_session.created for B and C
     X-->>K: 200 (A is now with D)
   end
-  
-	1	The wall lookup (messages 3 and 4) covers all four walls. If D is free there is no C, so only A, B and D are checked.
-	2	A is confirmed in room 2 before leaving room 1. A dropped network never leaves A in neither call.
-	3	A database transaction cannot span LiveKit. The rows are written in one transaction after LiveKit confirms, and a small reconciler repairs any wall found in the idle room without an IdleSession row, or the reverse.
-	4	Call 2 stays alive as A's call with D. Call 1 ends because both its walls have left it.
-Reconnecting a parked wall
-This is the same sequence with the parked wall as the target. The atomic claim moves from "claim Call 2" to the idle row below, and the wall's old partner (if still in a call) is parked as usual.
+  </pre></figure>
+  <ol class="flow" style="margin-top:12px">
+    <li>The wall lookup (messages 3 and 4) covers all four walls. If D is free there is no C, so only A, B and D are checked.</li>
+    <li>A is confirmed in room 2 before leaving room 1. A dropped network never leaves A in neither call.</li>
+    <li>A database transaction cannot span LiveKit. The rows are written in one transaction after LiveKit confirms, and a small reconciler repairs any wall found in the idle room without an <code>IdleSession</code> row, or the reverse.</li>
+    <li>Call 2 stays alive as A's call with D. Call 1 ends because both its walls have left it.</li>
+  </ol>
+  <h3>Reconnecting a parked wall</h3>
+  <p>This is the same sequence with the parked wall as the target. The atomic claim moves from "claim Call 2" to the idle row below, and the wall's old partner (if still in a call) is parked as usual.</p>
+  <figure class="fig"><pre class="mermaid">
 sequenceDiagram
   autonumber
   participant K as Controller for Wall A
@@ -256,9 +390,13 @@ sequenceDiagram
     D-->>X: already claimed or expired
     X-->>K: 409 target_unavailable
   end
-  
-State model
-Three persisted states: idle, resumed, expired. A reconnected wall is a normal call participant again. An un-reconnected one ends at the timeout and returns to its home screen.
+  </pre></figure>
+</section>
+
+<section id="state">
+  <h2>State model</h2>
+  <p>Three persisted states: idle, resumed, expired. A reconnected wall is a normal call participant again. An un-reconnected one ends at the timeout and returns to its home screen.</p>
+  <figure class="fig"><pre class="mermaid">
 stateDiagram-v2
   [*] --> InCall
   InCall --> Parked: partner or its own wall switched away
@@ -268,25 +406,23 @@ stateDiagram-v2
   Expired --> HomeScreen
   Parked --> HomeScreen: wall powered off or released
   HomeScreen --> [*]
-  
-Reconnect and timeout are two writers to the same row. Both use WHERE status='idle', so exactly one wins.
-API and events
-ENDPOINT OR EVENT
-WHAT IT DOES
-POST /calls/:callId/switch {targetUserId}
-Moves the caller's wall to the target wall. The target can be in a call, parked or free. No mode field, because there is only one outcome.
-GET /idle-sessions
-Lists parked walls in the caller's workspace, with time parked and the call they came from.
-POST /idle-sessions/:id/release
-Sends a parked wall to its home screen early.
-idle_session.created / .resumed / .expired
-Pushed on the existing realtime channel to wall kiosks and controllers. No polling.
-wall_session.heartbeat (realtime, not REST)
-Kiosk and Controller push this on a short interval to refresh WallSession.lastHeartbeatAt. A session whose heartbeat goes stale is what the reconciler treats as dead.
-GET /api/walls/by-user/:userId (portal)
-Read-only. Returns {wallType}. Called synchronously for every wall the switch moves.
-The atomic claim
--- target is in a call: only one switch may take it
+  </pre></figure>
+  <p class="cap">Reconnect and timeout are two writers to the same row. Both use <code>WHERE status='idle'</code>, so exactly one wins.</p>
+</section>
+
+<section id="api">
+  <h2>API and events</h2>
+  <div class="scroll"><table>
+    <tr><th>Endpoint or event</th><th>What it does</th></tr>
+    <tr><td><code>POST /calls/:callId/switch</code> <span class="mono">{targetUserId}</span></td><td>Moves the caller's wall to the target wall. The target can be in a call, parked or free. No <code>mode</code> field, because there is only one outcome.</td></tr>
+    <tr><td><code>GET /idle-sessions</code></td><td>Lists parked walls in the caller's workspace, with time parked and the call they came from.</td></tr>
+    <tr><td><code>POST /idle-sessions/:id/release</code></td><td>Sends a parked wall to its home screen early.</td></tr>
+    <tr><td><code>idle_session.created / .resumed / .expired</code></td><td>Pushed on the existing realtime channel to wall kiosks and controllers. No polling.</td></tr>
+    <tr><td><code>wall_session.heartbeat</code> (realtime, not REST)</td><td>Kiosk and Controller push this on a short interval to refresh <code>WallSession.lastHeartbeatAt</code>. A session whose heartbeat goes stale is what the reconciler treats as dead.</td></tr>
+    <tr><td><code>GET /api/walls/by-user/:userId</code> (portal)</td><td>Read-only. Returns <span class="mono">{wallType}</span>. Called synchronously for every wall the switch moves.</td></tr>
+  </table></div>
+  <h3>The atomic claim</h3>
+  <pre class="code">-- target is in a call: only one switch may take it
 UPDATE calls SET version = version + 1
  WHERE id = $callId AND status = 'active' AND version = $seen;
 
@@ -294,121 +430,211 @@ UPDATE calls SET version = version + 1
 UPDATE idle_sessions SET status = 'resumed', resumed_into_call_id = $1
  WHERE id = $id AND status = 'idle';
 
--- 0 rows affected  =>  409 target_unavailable, controller shows "just taken"
-The timeout job uses the same predicate with status='expired'.
-Frontend
-Two surfaces: the wall kiosk (the existing web UI, plus new states) and a new Wall Controller page.
-COMPONENT
-LIVES IN
-JOB
-Parked screen and Connecting overlay
-kiosk call UI, next to PresentationModeOverlay.tsx
-Large, input-free states for the 140-inch wall.
-idleSessionMachine
-new XState machine
-Owns the parked connection independent of the call screen: connected, parked, then reconnected or timed out. Pushes the WallSession heartbeat on its own interval regardless of which screen is active.
-Wall Controller page
-new route, phone-first
-Shows the wall's state, the Switch button and the Parked list.
-Switch target picker
-Controller, new SwitchWallModal
-Lists ongoing calls, parked walls and free walls, then confirms.
-Why a separate machine
-roomMachine and callMachine model one call's lifecycle. A parked wall has no call but still holds a connection. That needs its own owner.
-Still open: which transport carries today's join and leave updates. It was not identified. The design requires push, so confirm the channel, likely a workspace-keyed websocket, before Phase 1.
-Edge cases and failure modes
-SCENARIO
-RISK
-HANDLING
-Network drops mid-switch
-Wall A ends up in neither call
-Join the new room, confirm, then leave the old one. A keeps showing B until then.
-Two walls try to take D at once
-D is pulled two ways
-Atomic claim on Call 2. The loser gets 409 and the controller says "just taken".
-Timeout fires during a reconnect
-Half-ended session
-Same conditional update. One wins.
-One of the four walls is PRIMARY
-A wall that must not move gets parked
-Whole switch refused with a named reason. Nothing changes.
-Parked wall left on for a long time
-Idle LiveKit sessions pile up
-Timeout returns it to the home screen. Camera and mic stay off throughout.
-Black frame or audio gap on switch
-Reads as a bug at 140 inches
-Blurred hold plus a large "Connecting…" line.
-Two 4K streams during join-first
-Heavy decode load on the wall
-Connect to room 2 without subscribing to video, then swap subscriptions on confirm. Needs a load test.
-Database and LiveKit disagree after a crash
-Wall in idle room with no row, or row with no wall
-Reconciler compares LiveKit room membership against WallSession, using lastHeartbeatAt as the grace period. A session with no recent heartbeat is treated as dead even if nothing explicitly closed it.
-Controller loses its pairing
-Nobody can switch that wall
-Re-pair from the wall's pairing screen. Calls already running are unaffected.
-Access control
-The Parked list and the picker only show walls in the same workspace as the controller. Every boundary this design touches, Channel and Call, is already workspace-scoped, and an org-wide "which walls are free right now" list would be a new privacy surface.
-Needs a yes or no. Scope was confirmed as needed but not chosen. Workspace is used as the safer default until someone confirms.
-Rollout
-Parked ships first as a read-only concept so real-time sync and wall screens are proven before switching depends on them.
-PHASE
-SCOPE
-GATE TO MOVE ON
-0 Data model
-IdleSession table, idle API, wall lookup endpoint, feature flag off
-Backend tests pass, no visible change
-1 Parked, manual
-Parked screen on two lab walls, Controller with a manual "park" and "reconnect" only. No switch yet.
-Live sync proven, reconnect latency measured on real 140-inch walls
-2 Switch on lab walls
-Full A, B, C, D switch on four lab walls, all SWITCHABLE
-Hardware team signs off on camera, audio and decode load
-3 Production walls
-Roll out wall by wall, setting each to SWITCHABLE as it is ready
-None
-Decisions
-#
-QUESTION
-STATUS
-OUTCOME
-1
-Swap vs join default
-Removed
-Calls are 1:1 between walls, so join no longer exists. A switch always parks the target's partner.
-2
-Idle timeout
-Placeholder
-Reconnected becomes a normal call, un-reconnected ends at timeout. 10 minutes until LiveKit capacity gives a number.
-3
-Real-time transport
-Decided
-Push, no polling. The actual transport is still to be identified.
-4
-Who initiates a switch
-Needs confirm
-The earlier "wall is target only" no longer works when every participant is a wall. Proposed: a paired Wall Controller acts as the wall. Confirm this device, or name another (touch overlay, remote).
-5
-Visibility scope
-Needs confirm
-Workspace-scoped used as default.
-6
-SWITCHABLE wall type
-Decided
-Exists for this feature. Now required on A, B, C and D, not only the target.
-7
-What "instant" means in LiveKit
-New
-Idle room per workspace plus fast join. Confirm or measure.
-8
-Does a free wall auto-answer?
-New
-Switching to a free wall assumes it joins like today's autojoin. Confirm no ring or accept step is needed.
-9
-Camera and mic while parked
-New
-Proposed off, with an on-screen line saying so. Confirm with whoever owns room privacy.
-10
-Session table for connection liveness
-Added
-WallSession is now the single record of which LiveKit room a wall is connected to and whether that connection is still alive, via a refreshed lastHeartbeatAt. IdleSession references it instead of duplicating the room SID.
+-- 0 rows affected  =>  409 target_unavailable, controller shows "just taken"</pre>
+  <p class="cap" style="margin-top:8px">The timeout job uses the same predicate with <code>status='expired'</code>.</p>
+</section>
+
+<section id="fe">
+  <h2>Frontend</h2>
+  <p>Two surfaces: the wall kiosk (the existing web UI, plus new states) and a new Wall Controller page.</p>
+  <div class="scroll"><table>
+    <tr><th>Component</th><th>Lives in</th><th>Job</th></tr>
+    <tr><td>Parked screen and Connecting overlay</td><td>kiosk call UI, next to <code>PresentationModeOverlay.tsx</code></td><td>Large, input-free states for the 140-inch wall.</td></tr>
+    <tr><td><code>idleSessionMachine</code></td><td>new XState machine</td><td>Owns the parked connection independent of the call screen: connected, parked, then reconnected or timed out. Pushes the <code>WallSession</code> heartbeat on its own interval regardless of which screen is active.</td></tr>
+    <tr><td>Wall Controller page</td><td>new route, phone-first</td><td>Shows the wall's state, the Switch button and the Parked list.</td></tr>
+    <tr><td>Switch target picker</td><td>Controller, new <code>SwitchWallModal</code></td><td>Lists ongoing calls, parked walls and free walls, then confirms.</td></tr>
+  </table></div>
+  <h3>Why a separate machine</h3>
+  <p><code>roomMachine</code> and <code>callMachine</code> model one call's lifecycle. A parked wall has no call but still holds a connection. That needs its own owner.</p>
+  <div class="note" style="margin-top:14px"><b>Still open:</b> which transport carries today's join and leave updates. It was not identified. The design requires push, so confirm the channel, likely a workspace-keyed websocket, before Phase 1.</div>
+</section>
+
+<section id="edge">
+  <h2>Edge cases and failure modes</h2>
+  <div class="scroll"><table>
+    <tr><th>Scenario</th><th>Risk</th><th>Handling</th></tr>
+    <tr><td>Network drops mid-switch</td><td>Wall A ends up in neither call</td><td>Join the new room, confirm, then leave the old one. A keeps showing B until then.</td></tr>
+    <tr><td>Two walls try to take D at once</td><td>D is pulled two ways</td><td>Atomic claim on Call 2. The loser gets 409 and the controller says "just taken".</td></tr>
+    <tr><td>Timeout fires during a reconnect</td><td>Half-ended session</td><td>Same conditional update. One wins.</td></tr>
+    <tr><td>One of the four walls is PRIMARY</td><td>A wall that must not move gets parked</td><td>Whole switch refused with a named reason. Nothing changes.</td></tr>
+    <tr><td>Parked wall left on for a long time</td><td>Idle LiveKit sessions pile up</td><td>Timeout returns it to the home screen. Camera and mic stay off throughout.</td></tr>
+    <tr><td>Black frame or audio gap on switch</td><td>Reads as a bug at 140 inches</td><td>Blurred hold plus a large "Connecting…" line.</td></tr>
+    <tr><td>Two 4K streams during join-first</td><td>Heavy decode load on the wall</td><td>Connect to room 2 without subscribing to video, then swap subscriptions on confirm. Needs a load test.</td></tr>
+    <tr><td>Database and LiveKit disagree after a crash</td><td>Wall in idle room with no row, or row with no wall</td><td>Reconciler compares LiveKit room membership against <code>WallSession</code>, using <code>lastHeartbeatAt</code> as the grace period. A session with no recent heartbeat is treated as dead even if nothing explicitly closed it.</td></tr>
+    <tr><td>Controller loses its pairing</td><td>Nobody can switch that wall</td><td>Re-pair from the wall's pairing screen. Calls already running are unaffected.</td></tr>
+  </table></div>
+</section>
+
+<section id="access">
+  <h2>Access control</h2>
+  <p>The Parked list and the picker only show walls in the same workspace as the controller. Every boundary this design touches, <code>Channel</code> and <code>Call</code>, is already workspace-scoped, and an org-wide "which walls are free right now" list would be a new privacy surface.</p>
+  <div class="note"><b>Needs a yes or no.</b> Scope was confirmed as needed but not chosen. Workspace is used as the safer default until someone confirms.</div>
+</section>
+
+<section id="rollout">
+  <h2>Rollout</h2>
+  <p>Parked ships first as a read-only concept so real-time sync and wall screens are proven before switching depends on them.</p>
+  <div class="scroll"><table>
+    <tr><th>Phase</th><th>Scope</th><th>Gate to move on</th></tr>
+    <tr><td>0 Data model</td><td><code>IdleSession</code> table, idle API, wall lookup endpoint, feature flag off</td><td>Backend tests pass, no visible change</td></tr>
+    <tr><td>1 Parked, manual</td><td>Parked screen on two lab walls, Controller with a manual "park" and "reconnect" only. No switch yet.</td><td>Live sync proven, reconnect latency measured on real 140-inch walls</td></tr>
+    <tr><td>2 Switch on lab walls</td><td>Full A, B, C, D switch on four lab walls, all <code>SWITCHABLE</code></td><td>Hardware team signs off on camera, audio and decode load</td></tr>
+    <tr><td>3 Production walls</td><td>Roll out wall by wall, setting each to <code>SWITCHABLE</code> as it is ready</td><td>None</td></tr>
+  </table></div>
+</section>
+
+<section id="decisions">
+  <h2>Decisions</h2>
+  <div class="scroll"><table>
+    <tr><th>#</th><th>Question</th><th>Status</th><th>Outcome</th></tr>
+    <tr><td>1</td><td>Swap vs join default</td><td><span class="tag ok">Removed</span></td><td>Calls are 1:1 between walls, so join no longer exists. A switch always parks the target's partner.</td></tr>
+    <tr><td>2</td><td>Idle timeout</td><td><span class="tag idle">Placeholder</span></td><td>Reconnected becomes a normal call, un-reconnected ends at timeout. 10 minutes until LiveKit capacity gives a number.</td></tr>
+    <tr><td>3</td><td>Real-time transport</td><td><span class="tag ok">Decided</span></td><td>Push, no polling. The actual transport is still to be identified.</td></tr>
+    <tr><td>4</td><td>Who initiates a switch</td><td><span class="tag crit">Needs confirm</span></td><td>The earlier "wall is target only" no longer works when every participant is a wall. Proposed: a paired Wall Controller acts as the wall. Confirm this device, or name another (touch overlay, remote).</td></tr>
+    <tr><td>5</td><td>Visibility scope</td><td><span class="tag idle">Needs confirm</span></td><td>Workspace-scoped used as default.</td></tr>
+    <tr><td>6</td><td><code>SWITCHABLE</code> wall type</td><td><span class="tag ok">Decided</span></td><td>Exists for this feature. Now required on A, B, C and D, not only the target.</td></tr>
+    <tr><td>7</td><td>What "instant" means in LiveKit</td><td><span class="tag crit">New</span></td><td>Idle room per workspace plus fast join. Confirm or measure.</td></tr>
+    <tr><td>8</td><td>Does a free wall auto-answer?</td><td><span class="tag crit">New</span></td><td>Switching to a free wall assumes it joins like today's autojoin. Confirm no ring or accept step is needed.</td></tr>
+    <tr><td>9</td><td>Camera and mic while parked</td><td><span class="tag crit">New</span></td><td>Proposed off, with an on-screen line saying so. Confirm with whoever owns room privacy.</td></tr>
+    <tr><td>10</td><td>Session table for connection liveness</td><td><span class="tag ok">Added</span></td><td><code>WallSession</code> is now the single record of which LiveKit room a wall is connected to and whether that connection is still alive, via a refreshed <code>lastHeartbeatAt</code>. <code>IdleSession</code> references it instead of duplicating the room SID.</td></tr>
+  </table></div>
+</section>
+</main>
+</div>
+
+<script>
+(function(){
+  /* simulator */
+  var dCall=true;
+  var cols=document.getElementById('simcols'), note=document.getElementById('simnote');
+  function chip(x,m){return '<span class="chip'+(m?' moved':'')+'">'+x+'</span>'}
+  function col(t,c,cls){return '<div class="col '+(cls||'')+'"><h4>'+t+'</h4>'+c+'</div>'}
+  function render(){
+    var before=dCall?'<div class="pair">'+chip('A')+'<i>↔</i>'+chip('B')+'</div><div class="pair">'+chip('C')+'<i>↔</i>'+chip('D')+'</div>':'<div class="pair">'+chip('A')+'<i>↔</i>'+chip('B')+'</div><div class="pair">'+chip('D')+'<i>free</i></div>';
+    var after='<div class="pair">'+chip('A',1)+'<i>↔</i>'+chip('D',1)+'</div>';
+    var parked=dCall?chip('B',1)+chip('C',1):chip('B',1);
+    cols.innerHTML=col('Before',before,'')+col('After: active call',after,'')+col('After: parked',parked,'idlec');
+    document.getElementById('d-call').setAttribute('aria-pressed',dCall);
+    document.getElementById('d-free').setAttribute('aria-pressed',!dCall);
+    note.textContent=dCall?'A and D talk alone. B (left behind) and C (D’s old partner) are both parked and can be reconnected from any controller in the workspace.':'D was free, so there is no C. Only B is parked.';
+  }
+  document.getElementById('d-call').onclick=function(){dCall=true;render()};
+  document.getElementById('d-free').onclick=function(){dCall=false;render()};
+  render();
+
+  /* walkthrough */
+  function wall(name,cls,inner,tag){return '<div class="wall '+(cls||'')+'"><span class="lbl">'+name+(tag?'<em>'+tag+'</em>':'')+'</span>'+inner+'</div>'}
+  function feed(n,cap){return '<div class="feed"><b>'+n+'</b></div><span class="cap-bar">'+cap+'</span>'}
+  function parked(from){return '<div class="big">Parked<small>'+from+' was moved to another call. Camera off. Returns to home in 10:00</small></div>'}
+  function opt(a,b,pill,sel,cls){return '<div class="opt'+(sel?' sel':'')+'"><span>'+a+'<small>'+b+'</small></span><span class="pill '+(cls||'')+'">'+pill+'</span></div>'}
+  var S=[
+   {t:'1 In call',n:1,
+    w:[wall('WALL A · MUMBAI 4F','',feed('B','Bina · Pune 3F'),'in call')],
+    p:'<h4>Wall A <span class="pill gr">connected</span></h4><div class="opt"><span>With Wall B<small>Pune 3F · 14:02</small></span></div><span class="pbtn p">Switch wall</span><span class="pbtn">Parked walls (0)</span>',
+    c:'<h4>Starting point</h4><p>Wall A shows B full-screen. The wall has no buttons. The controller in the room shows the call and one Switch button.</p>'},
+   {t:'2 Pick a wall',n:1,
+    w:[wall('WALL A · MUMBAI 4F','',feed('B','Bina · Pune 3F'),'in call')],
+    p:'<h4>Switch to…</h4><div class="p-sub">In a call</div>'+opt('Wall D','with Wall C · 06:11','call',1)+'<div class="p-sub">Parked</div>'+opt('Wall F','parked 2:10','parked',0,'am')+'<div class="p-sub">Free</div>'+opt('Wall G','Delhi 2F','free',0,'gr'),
+    c:'<h4>Target picker</h4><p>Three groups: walls in a call, parked walls, and free walls. Each row shows who the wall is with. Walls that are not SWITCHABLE are not listed.</p>'},
+   {t:'3 Confirm',n:1,
+    w:[wall('WALL A · MUMBAI 4F','',feed('B','Bina · Pune 3F'),'in call')],
+    p:'<h4>Connect to Wall D?</h4><p style="font-size:12px;margin:0 0 6px">This will park:</p>'+opt('Wall B','your current partner','park',0,'am')+opt('Wall C','Wall D’s current partner','park',0,'am')+'<span class="pbtn p">Connect</span><span class="pbtn">Cancel</span>',
+    c:'<h4>The one confirmation</h4><p>It names every wall that will be parked. Nothing ends, so there is no "this will end your call" warning. There is no join option because every call is two walls.</p>'},
+   {t:'4 Connecting',n:1,
+    w:[wall('WALL A · MUMBAI 4F','','<div class="dimfeed"></div><div class="big"><div class="spin"></div>Connecting to Delhi 5F…<small>Still with Pune 3F until connected</small></div>','connecting')],
+    p:'<h4>Connecting…</h4><div class="opt"><span>Wall D<small>joining room</small></span></div><span class="pbtn">Cancel</span>',
+    c:'<h4>Behind the scenes</h4><p>The wall holds a blurred last frame. A joins room 2 and only leaves room 1 after that is confirmed. Cancel here leaves A with B.</p>'},
+   {t:'5 After the switch',n:3,
+    w:[wall('WALL A · MUMBAI 4F','',feed('D','Dev · Delhi 5F'),'in call'),wall('WALL B · PUNE 3F','parked',parked('Mumbai 4F'),'parked'),wall('WALL C · DELHI 5F-2','parked',parked('Delhi 5F'),'parked')],
+    p:'<h4>Wall A <span class="pill gr">connected</span></h4><div class="opt"><span>With Wall D<small>Delhi 5F · 0:12</small></span></div><span class="pbtn p">Switch wall</span><span class="pbtn">Parked walls (2)</span>',
+    c:'<h4>After the switch</h4><p>A and D are connected. B and C each show a large amber Parked screen that says what happened, with camera off, so the people in those rooms are never left guessing.</p>'},
+   {t:'6 Reconnect',n:3,
+    w:[wall('WALL A · MUMBAI 4F','',feed('D','Dev · Delhi 5F'),'in call'),wall('WALL B · PUNE 3F','parked',parked('Mumbai 4F'),'parked'),wall('WALL C · DELHI 5F-2','parked',parked('Delhi 5F'),'parked')],
+    p:'<h4>Parked walls</h4>'+opt('Wall B','from Wall A · 1:20','parked',1,'am')+opt('Wall C','from Wall D · 1:20','parked',0,'am')+'<span class="pbtn p">Connect to Wall B</span>',
+    c:'<h4>Reconnect is a switch</h4><p>Choosing a parked wall runs the same confirmation. A leaves D, D is parked, and A connects to B. If someone else took B first, the controller says so and nothing changes.</p>'}
+  ];
+  var bar=document.getElementById('steps'),wl=document.getElementById('walls'),ph=document.getElementById('phone'),sc=document.getElementById('sidecopy'),bs=[];
+  function show(i){var s=S[i];wl.className='walls'+(s.n===3?' three':'');wl.innerHTML=s.w.join('');ph.innerHTML=s.p;sc.innerHTML=s.c;bs.forEach(function(b,k){b.setAttribute('aria-selected',k===i)})}
+  S.forEach(function(x,i){var b=document.createElement('button');b.type='button';b.setAttribute('role','tab');b.textContent=x.t;b.onclick=function(){show(i)};bar.appendChild(b);bs.push(b)});
+  show(2);
+})();
+</script>
+
+<!--claude-mermaid-runtime-begin:3477-->
+<style>.mermaid-diagram{margin-block:4px}.mermaid-diagram svg{display:block;margin:0 auto;max-width:100%;height:auto}</style>
+<script src="/_runtime/mermaid-11.16.1.min.js"></script>
+<script>(function(){
+var CFG={"palettes":{"light":{"surface":"#f4efe4","text":"#42392e","line":"#8a7f6d","border":"#7a6c52","bg":"#fffdf8"},"dark":{"surface":"#262b34","text":"#f2f3f5","line":"#a8adb8","border":"#9aa4b8","bg":"#1f232b"}}};
+if(typeof mermaid==='undefined')return;
+var pres=Array.prototype.slice.call(document.querySelectorAll('pre.mermaid')).filter(function(p){if(p.hasAttribute('data-claude-mermaid-claimed'))return false;p.setAttribute('data-claude-mermaid-claimed','1');return true;});
+if(!pres.length)return;
+var mq=window.matchMedia?window.matchMedia('(prefers-color-scheme: dark)'):null;
+var root=document.documentElement;
+var items=pres.map(function(pre){
+var mount=document.createElement('div');mount.className='mermaid-diagram';
+return {pre:pre,mount:mount,src:pre.textContent||''};
+});
+var seq=0;
+var renderGen=0;
+var lastKey='';
+function pageBg(fallback){
+var els=[document.body,document.documentElement];
+for(var i=0;i<els.length;i++){
+var c=els[i]&&getComputedStyle(els[i]).backgroundColor;
+if(c&&c!=='transparent'&&c!=='rgba(0, 0, 0, 0)')return c;
+}
+return fallback;
+}
+function render(){
+var theme=root.getAttribute('data-theme');
+var dark=theme==='dark'||(!!(mq&&mq.matches)&&theme!=='light');
+var pal=dark?CFG.palettes.dark:CFG.palettes.light;
+var bg=pageBg(pal.bg);
+var key=(dark?'d':'l')+'|'+bg;
+if(key===lastKey)return;
+lastKey=key;
+var gen=++renderGen;
+var font=getComputedStyle(document.body).fontFamily||'sans-serif';
+var nat={useMaxWidth:false};
+mermaid.initialize({
+startOnLoad:false,securityLevel:'strict',theme:'base',
+flowchart:nat,sequence:nat,er:nat,state:nat,class:nat,pie:nat,
+gantt:nat,journey:nat,timeline:nat,gitGraph:nat,mindmap:nat,xyChart:nat,
+quadrantChart:nat,sankey:nat,c4:nat,requirement:nat,block:nat,
+packet:nat,kanban:nat,architecture:nat,radar:nat,
+themeVariables:{background:bg,mainBkg:pal.surface,primaryColor:pal.surface,
+primaryTextColor:pal.text,lineColor:pal.line,primaryBorderColor:pal.border,
+nodeBorder:pal.border,clusterBorder:pal.border,edgeLabelBackground:bg,
+clusterBkg:'rgba(127,127,127,0.07)',titleColor:pal.text,
+darkMode:dark,rowOdd:bg,rowEven:'rgba(127,127,127,0.07)',
+attributeBackgroundColorOdd:bg,attributeBackgroundColorEven:'rgba(127,127,127,0.07)',
+fontSize:'16px',fontFamily:font},
+themeCSS:'.node rect, .node circle, .node polygon, .node path, .cluster rect { stroke-width: 2px; }'
+});
+items.forEach(function(it){
+var id='claude-mermaid-'+seq++;
+mermaid.render(id,it.src).then(function(r){
+if(gen!==renderGen)return;
+var prev=it.pre.previousElementSibling;
+if(prev&&prev.className==='mermaid-diagram'&&prev!==it.mount)return;
+it.mount.innerHTML=r.svg;
+if(!it.mount.parentNode)it.pre.parentNode.insertBefore(it.mount,it.pre);
+it.pre.style.display='none';
+},function(){
+var scratch=document.getElementById(id);
+if(scratch)scratch.parentNode.removeChild(scratch);
+scratch=document.getElementById('d'+id);
+if(scratch)scratch.parentNode.removeChild(scratch);
+if(gen!==renderGen)return;
+if(it.mount.parentNode)it.mount.parentNode.removeChild(it.mount);
+it.pre.style.display='';
+});
+});
+}
+render();
+if(mq&&mq.addEventListener)mq.addEventListener('change',render);
+if(typeof MutationObserver!=='undefined')new MutationObserver(render).observe(root,{attributes:true,attributeFilter:['data-theme']});
+})();</script>
+<!--claude-mermaid-runtime-end-->
+
+</body></html>
