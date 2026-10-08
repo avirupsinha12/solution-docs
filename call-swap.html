@@ -1,0 +1,414 @@
+SECTIONS
+Summary
+Current state
+The scenario
+UX flow
+140-inch wall rules
+Parked walls
+Architecture
+Data model
+Sequences
+State model
+API and events
+Frontend
+Edge cases
+Access control
+Rollout
+Decisions
+TELEPRESENCE × XYNE · V2, WALL-TO-WALL ONLY
+Call switching with a parked-walls channel
+Every call is exactly two walls, each a 140-inch screen. One wall can move from its current partner to a different wall in one action. Both walls it leaves behind are parked, still connected and ready to be reconnected, never dropped.
+Scenario: A↔B and C↔D
+Every call has exactly 2 participants, both walls
+LiveKit video only
+Updated 8 Oct 2026
+What changed from v1
+Join mode and group calls are removed, so there is no swap-or-join question. A switch always takes the target wall out of its call. Because a wall has no keyboard, a paired Wall Controller (phone or tablet) now starts the switch.
+What gets built
+Two new tables (WallSession, IdleSession), three endpoints, one read-only lookup on telepresence-portal, a Parked screen on every wall, and a Wall Controller page. Call and CallParticipant do not change.
+Current state
+Nothing links a Xyne call to a telepresence wall in either database. A wall is a kiosk Chrome browser that opens a URL, so Xyne sees it as an ordinary user.
+SYSTEM
+WHAT IT TRACKS
+CALL / WALL LINKAGE
+Xyne schema.prisma
+Call (LiveKit room, status, roomLink) and CallParticipant (userId, joinedAt, leftAt)
+A wall joins as a normal User. Xyne cannot tell a wall from a person.
+xyne-spaces-private telepresence-monitoring
+TelepresenceHealthView/Log, TelepresenceMeetingStatus (userId, isMeetingActive)
+Keyed by userId only. No callId or roomId.
+telepresence-portal dashboard
+Wall (wallType, status), Meeting (sourceWallId, targetWallId)
+Meeting is wall-to-wall and internal. Nothing references a Xyne Call.id.
+How a wall joins today
+A kiosk Chrome with a persistent profile logs in and opens /<workspaceId>/chat/<route>/<channelId>?autoJoin=1&mic=…&camera=…&telepresence=1 (PR-029). The telepresence=1 flag only turns on Presentation Mode in the frontend. The backend row it creates is the same as any other user's.
+Calls run on LiveKit with one room per Call, created 1:1 by liveKitService.ts. There is no multi-room or room-bridging code.
+What exists to build on, and what does not
+Missing
+No mid-call idle state. Every "idle" in roomMachine.ts and callMachine.ts is a pre-join lifecycle state.
+Missing
+The "+1 call waiting" banner in IncomingCallModal ends the current call before joining the new one. That forced end is what this project replaces.
+Missing
+No way for a person to control a wall. The wall is a kiosk browser with no input device, so nobody can press a button on it.
+Usable
+Wall.wallType already has a SWITCHABLE value next to PRIMARY. It is declared and never read, and it is confirmed to exist for this feature.
+The scenario
+Wall A is talking to Wall B. Wall C is talking to Wall D. Someone at Wall A wants D instead of B. After the switch, A and D are connected. B and C are both parked. If D was not in a call, only B is parked. Try both:
+WALL D IS
+in a call with C
+free
+
+Highlighted circles are walls that changed place.
+UX flow
+A person standing at Wall A uses the Wall Controller on a phone or tablet. The wall screen only shows the call and its status. Step through the six moments below. Dark panels are the proposed UI: wall screens on the left, the controller on the right.
+
+
+Rules the flow follows
+	1	Switching is always one confirmation. The confirm text names which walls will be parked.
+	2	The picker lists ongoing calls, parked walls and free walls. Each row shows the wall label and who it is with.
+	3	Wall A keeps showing its current partner until the new connection is confirmed. If the switch fails, A is still with B.
+	4	Parked walls always tell the room what happened and who can bring them back. A wall never just goes black.
+	5	Walls that are not marked SWITCHABLE do not appear in the picker and cannot be parked.
+Rules for a 140-inch screen
+People stand two to four metres from these screens, and the feed is life-size. That changes what the wall UI may do.
+MOMENT
+WHAT THE WALL SHOWS
+WHY
+In call
+Full-screen partner feed. A small label at the bottom edge with partner name and place. No buttons.
+The wall has no input. Anything clickable would be dead UI at that size.
+Connecting
+The last frame, blurred, with one large line: "Connecting to Pune 3F…"
+A sudden black frame across 140 inches reads as a failure. A blurred hold reads as intentional.
+Parked
+Amber screen, large type: "Parked. Pune 3F was moved to another call." A small timer shows when it returns to the home screen.
+The people in the room need to know the wall is waiting, and why.
+Camera and microphone
+Off while parked. A visible "Camera off" line on the screen.
+A parked wall must never keep broadcasting a room that nobody is watching.
+Return to home
+The wall's normal home or ambient screen after the timeout.
+Parked is temporary. It must not become a stuck state.
+Needs confirming with the hardware team: whether the wall's own pipeline (camera, audio, display scaler) is call-agnostic. It looks like a plain kiosk feed, but the Python side was not researched, and 4K decode on two rooms at once during a join-first switch may be a real load.
+Parked walls
+Parked is a real connection that is not part of any call. It is the opposite of hanging up. Today the data model only knows "in call" and "left" (CallParticipant.leftAt). Parked is a third state between them.
+
+IN CALL
+PARKED
+ENDED
+Connection
+Live, publishing to the call room
+Live in the workspace's idle room, not publishing
+Closed, wall at home screen
+Camera and mic
+On
+Off
+Off
+Seen by others
+By its partner
+No
+No
+Reconnect
+n/a
+Fast: token already issued, join the call room, then leave the idle room
+Full rejoin with a new session
+Listed on controllers
+As "in a call with X"
+In the Parked list, with time parked
+As "free"
+Reconnecting a parked wall
+Reconnecting is the same action as switching, with a parked wall as the target. From the controller at Wall A, tap a parked wall and confirm. A leaves its current partner (who becomes parked) and connects to the parked wall. There is no separate resume flow.
+Timeout
+A parked wall that nobody reconnects ends for real and returns to its home screen. Start with 10 minutes, configurable. That number is a placeholder until whoever owns LiveKit capacity gives a real one.
+Needs a decision: what "instant" means in LiveKit. A LiveKit participant belongs to one room and tracks cannot move between rooms, so a handshake-free reconnect is not possible. The proposed design keeps each parked wall connected to a per-workspace idle room with a token for the call room already minted. Reconnecting connects to the call room first and leaves the idle room second. That should feel instant, usually well under a second. Please confirm that is acceptable, or measure it before Phase 1.
+Architecture
+Every new piece lives in Xyne's backend or in the two web UIs. The one cross-system call is a read-only question to telepresence-portal about a wall's type.
+CLIENTS
+Wall kiosk Chrome
+140-inch, same UI (PR-029)
+Wall Controller
+phone or tablet, paired
+idleSessionMachine
+runs in the wall kiosk
+Parked screen
+and Connecting overlay
+XYNE BACKEND
+Switch + Idle API
+POST switch · GET idle · POST release
+liveKitService.ts
+rooms, tokens (extended)
+Call · CallParticipant
+unchanged
+WallSession + IdleSession
+liveness + atomic claim
+MEDIA AND REALTIME
+LiveKit call rooms
+one room per Call, 2 walls
+LiveKit idle room
+one per workspace, no publishing
+Realtime channel (push)
+TELEPRESENCE-PORTAL
+GET /api/walls/by-user/:id
+read-only, returns wallType
+HEALTH PATH, NOT TOUCHED BY THIS PROJECT
+Wall
+health reports
+xyne-spaces-private
+telepresence-monitoring
+telepresence-portal dashboard
+Wall, Meeting
+Solid: calls the design makes. Dashed: the one cross-system read. Idle room and call rooms are separate LiveKit rooms.
+Blue boxes are new. Amber is the idle room.
+Who is allowed to switch
+A Wall Controller is paired to exactly one wall. Its token acts as that wall's user, so the backend sees "Wall A asks to switch" and not "a phone asks". Pairing is a one-time step per wall.
+Which walls must be switchable
+The switch moves up to four walls: A, B (parked), C (parked) and D (target). All of them must be SWITCHABLE. If any is PRIMARY, the switch is refused with a clear reason and nothing changes. Free walls only need A and D checked.
+Data model
+Call and CallParticipant are untouched. WallSession is the new source of truth for which LiveKit room a wall is actually connected to right now, in a call or parked. IdleSession layers the parked business state (who it's parked from, its timers) on top of a WallSession row instead of tracking its own room SID. Wall lives in another database and is read live, never copied. Every Call has exactly two active participants.
+erDiagram
+  USER ||--o{ CALL_PARTICIPANT : joins
+  CALL ||--|{ CALL_PARTICIPANT : has_two
+  USER ||--o| WALL_SESSION : connects_as
+  WALL_SESSION ||--o| IDLE_SESSION : parked_state
+  CALL ||--o{ IDLE_SESSION : parked_from
+  CALL |o--o{ IDLE_SESSION : reconnected_into
+  USER |o..o| WALL : read_only_lookup
+  WALL_SESSION {
+    string id PK
+    string userId FK "unique while connected"
+    string liveKitRoomSid
+    string roomKind "call or idle"
+    string callId FK "set when roomKind is call"
+    datetime connectedAt
+    datetime lastHeartbeatAt
+    string status "connected, disconnected"
+  }
+  IDLE_SESSION {
+    string id PK
+    string wallSessionId FK
+    string userId FK
+    string workspaceId "added for access scope"
+    string fromCallId FK
+    string status "idle, resumed, expired"
+    datetime idledAt
+    datetime expiresAt
+    string resumedIntoCallId FK
+  }
+  WALL {
+    string wallType "PRIMARY or SWITCHABLE"
+    string status
+  }
+  CALL_PARTICIPANT {
+    string userId
+    datetime joinedAt
+    datetime leftAt
+  }
+  
+The participant-to-idle link is not a foreign key. It is the switch itself: one participant row stops being active and one idle session starts. The parked wall's previous partner is derived from fromCallId. workspaceId is my addition so visibility can be filtered without a join. WallSession.lastHeartbeatAt is what "connected to the service" actually means: the kiosk and the Wall Controller refresh it on a short interval, and a session whose heartbeat goes stale is what the reconciler (Edge cases) treats as dead, not just a row nobody explicitly closed.
+Sequences
+Switching A to D (D is in a call with C)
+sequenceDiagram
+  autonumber
+  participant K as Controller for Wall A
+  participant X as Xyne backend
+  participant P as telepresence-portal
+  participant L as LiveKit
+  participant R as Realtime channel
+  K->>X: POST /calls/1/switch (targetUserId D)
+  X->>X: check controller is paired to A, same workspace
+  X->>P: GET /api/walls/by-user/:id for A, B, C, D
+  P-->>X: wallType for each
+  alt any wall is PRIMARY
+    X-->>K: 409 wall_not_switchable (nothing changed)
+  else all SWITCHABLE
+    X->>X: claim Call 2 (conditional update)
+    X->>L: Wall A joins room 2
+    L-->>X: join confirmed
+    X->>L: A leaves room 1, B and C move to idle room
+    X->>X: upsert WallSession for A, B, C; write IdleSession for B and C; end Call 1
+    X->>R: idle_session.created for B and C
+    X-->>K: 200 (A is now with D)
+  end
+  
+	1	The wall lookup (messages 3 and 4) covers all four walls. If D is free there is no C, so only A, B and D are checked.
+	2	A is confirmed in room 2 before leaving room 1. A dropped network never leaves A in neither call.
+	3	A database transaction cannot span LiveKit. The rows are written in one transaction after LiveKit confirms, and a small reconciler repairs any wall found in the idle room without an IdleSession row, or the reverse.
+	4	Call 2 stays alive as A's call with D. Call 1 ends because both its walls have left it.
+Reconnecting a parked wall
+This is the same sequence with the parked wall as the target. The atomic claim moves from "claim Call 2" to the idle row below, and the wall's old partner (if still in a call) is parked as usual.
+sequenceDiagram
+  autonumber
+  participant K as Controller for Wall A
+  participant X as Xyne backend
+  participant D as Database
+  participant L as LiveKit
+  participant R as Realtime channel
+  K->>X: POST /calls/2/switch (targetUserId B)
+  X->>D: UPDATE idle_sessions SET status resumed WHERE id AND status idle
+  alt one row updated
+    D-->>X: claimed
+    X->>L: B joins A's call room, leaves idle room
+    X->>L: D moves to idle room
+    X->>X: upsert WallSession for A, B, D
+    X->>R: idle_session.resumed for B, created for D
+    X-->>K: 200
+  else zero rows updated
+    D-->>X: already claimed or expired
+    X-->>K: 409 target_unavailable
+  end
+  
+State model
+Three persisted states: idle, resumed, expired. A reconnected wall is a normal call participant again. An un-reconnected one ends at the timeout and returns to its home screen.
+stateDiagram-v2
+  [*] --> InCall
+  InCall --> Parked: partner or its own wall switched away
+  Parked --> Reconnected: claim wins
+  Reconnected --> InCall: joins new call room
+  Parked --> Expired: timeout fires first
+  Expired --> HomeScreen
+  Parked --> HomeScreen: wall powered off or released
+  HomeScreen --> [*]
+  
+Reconnect and timeout are two writers to the same row. Both use WHERE status='idle', so exactly one wins.
+API and events
+ENDPOINT OR EVENT
+WHAT IT DOES
+POST /calls/:callId/switch {targetUserId}
+Moves the caller's wall to the target wall. The target can be in a call, parked or free. No mode field, because there is only one outcome.
+GET /idle-sessions
+Lists parked walls in the caller's workspace, with time parked and the call they came from.
+POST /idle-sessions/:id/release
+Sends a parked wall to its home screen early.
+idle_session.created / .resumed / .expired
+Pushed on the existing realtime channel to wall kiosks and controllers. No polling.
+wall_session.heartbeat (realtime, not REST)
+Kiosk and Controller push this on a short interval to refresh WallSession.lastHeartbeatAt. A session whose heartbeat goes stale is what the reconciler treats as dead.
+GET /api/walls/by-user/:userId (portal)
+Read-only. Returns {wallType}. Called synchronously for every wall the switch moves.
+The atomic claim
+-- target is in a call: only one switch may take it
+UPDATE calls SET version = version + 1
+ WHERE id = $callId AND status = 'active' AND version = $seen;
+
+-- target is parked: only one switch may reconnect it
+UPDATE idle_sessions SET status = 'resumed', resumed_into_call_id = $1
+ WHERE id = $id AND status = 'idle';
+
+-- 0 rows affected  =>  409 target_unavailable, controller shows "just taken"
+The timeout job uses the same predicate with status='expired'.
+Frontend
+Two surfaces: the wall kiosk (the existing web UI, plus new states) and a new Wall Controller page.
+COMPONENT
+LIVES IN
+JOB
+Parked screen and Connecting overlay
+kiosk call UI, next to PresentationModeOverlay.tsx
+Large, input-free states for the 140-inch wall.
+idleSessionMachine
+new XState machine
+Owns the parked connection independent of the call screen: connected, parked, then reconnected or timed out. Pushes the WallSession heartbeat on its own interval regardless of which screen is active.
+Wall Controller page
+new route, phone-first
+Shows the wall's state, the Switch button and the Parked list.
+Switch target picker
+Controller, new SwitchWallModal
+Lists ongoing calls, parked walls and free walls, then confirms.
+Why a separate machine
+roomMachine and callMachine model one call's lifecycle. A parked wall has no call but still holds a connection. That needs its own owner.
+Still open: which transport carries today's join and leave updates. It was not identified. The design requires push, so confirm the channel, likely a workspace-keyed websocket, before Phase 1.
+Edge cases and failure modes
+SCENARIO
+RISK
+HANDLING
+Network drops mid-switch
+Wall A ends up in neither call
+Join the new room, confirm, then leave the old one. A keeps showing B until then.
+Two walls try to take D at once
+D is pulled two ways
+Atomic claim on Call 2. The loser gets 409 and the controller says "just taken".
+Timeout fires during a reconnect
+Half-ended session
+Same conditional update. One wins.
+One of the four walls is PRIMARY
+A wall that must not move gets parked
+Whole switch refused with a named reason. Nothing changes.
+Parked wall left on for a long time
+Idle LiveKit sessions pile up
+Timeout returns it to the home screen. Camera and mic stay off throughout.
+Black frame or audio gap on switch
+Reads as a bug at 140 inches
+Blurred hold plus a large "Connecting…" line.
+Two 4K streams during join-first
+Heavy decode load on the wall
+Connect to room 2 without subscribing to video, then swap subscriptions on confirm. Needs a load test.
+Database and LiveKit disagree after a crash
+Wall in idle room with no row, or row with no wall
+Reconciler compares LiveKit room membership against WallSession, using lastHeartbeatAt as the grace period. A session with no recent heartbeat is treated as dead even if nothing explicitly closed it.
+Controller loses its pairing
+Nobody can switch that wall
+Re-pair from the wall's pairing screen. Calls already running are unaffected.
+Access control
+The Parked list and the picker only show walls in the same workspace as the controller. Every boundary this design touches, Channel and Call, is already workspace-scoped, and an org-wide "which walls are free right now" list would be a new privacy surface.
+Needs a yes or no. Scope was confirmed as needed but not chosen. Workspace is used as the safer default until someone confirms.
+Rollout
+Parked ships first as a read-only concept so real-time sync and wall screens are proven before switching depends on them.
+PHASE
+SCOPE
+GATE TO MOVE ON
+0 Data model
+IdleSession table, idle API, wall lookup endpoint, feature flag off
+Backend tests pass, no visible change
+1 Parked, manual
+Parked screen on two lab walls, Controller with a manual "park" and "reconnect" only. No switch yet.
+Live sync proven, reconnect latency measured on real 140-inch walls
+2 Switch on lab walls
+Full A, B, C, D switch on four lab walls, all SWITCHABLE
+Hardware team signs off on camera, audio and decode load
+3 Production walls
+Roll out wall by wall, setting each to SWITCHABLE as it is ready
+None
+Decisions
+#
+QUESTION
+STATUS
+OUTCOME
+1
+Swap vs join default
+Removed
+Calls are 1:1 between walls, so join no longer exists. A switch always parks the target's partner.
+2
+Idle timeout
+Placeholder
+Reconnected becomes a normal call, un-reconnected ends at timeout. 10 minutes until LiveKit capacity gives a number.
+3
+Real-time transport
+Decided
+Push, no polling. The actual transport is still to be identified.
+4
+Who initiates a switch
+Needs confirm
+The earlier "wall is target only" no longer works when every participant is a wall. Proposed: a paired Wall Controller acts as the wall. Confirm this device, or name another (touch overlay, remote).
+5
+Visibility scope
+Needs confirm
+Workspace-scoped used as default.
+6
+SWITCHABLE wall type
+Decided
+Exists for this feature. Now required on A, B, C and D, not only the target.
+7
+What "instant" means in LiveKit
+New
+Idle room per workspace plus fast join. Confirm or measure.
+8
+Does a free wall auto-answer?
+New
+Switching to a free wall assumes it joins like today's autojoin. Confirm no ring or accept step is needed.
+9
+Camera and mic while parked
+New
+Proposed off, with an on-screen line saying so. Confirm with whoever owns room privacy.
+10
+Session table for connection liveness
+Added
+WallSession is now the single record of which LiveKit room a wall is connected to and whether that connection is still alive, via a refreshed lastHeartbeatAt. IdleSession references it instead of duplicating the room SID.
